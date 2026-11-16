@@ -892,23 +892,38 @@ jobs:
           hle_gl_m = Path("dm/gfx/gl/hle_gl.m")
           if hle_gl_m.is_file():
               txt = hle_gl_m.read_text(encoding="utf-8")
-              txt = txt.replace(
+              # Match the presentation and pacing statements together so the
+              # fps_t declaration and use cannot land in different scopes.
+              # Newer engines moved the wait outside the autorelease pool; do
+              # not alter their synchronization or insert a dangling fps_t.
+              old_gl = (
                   "        int vs = S.swap_interval < 1 ? 1 : S.swap_interval > 4 ? 4 : S.swap_interval;\n"
                   "        int k = g_win.cur;\n"
                   "        g_win.ticket[k] = mtl_present_ext(g_win.serial[k], vs / 60.0, (__bridge void *)g_ev, v, NULL);\n"
                   "        g_win.cur = (k + 1) % NWIN;\n"
-                  "        if (g_win.ticket[g_win.cur]) mtl_present_wait(g_win.ticket[g_win.cur]);",
+                  "        if (g_win.ticket[g_win.cur]) mtl_present_wait(g_win.ticket[g_win.cur]);   // its previous present has been shown, so drawing into it again is safe\n"
+                  "        // Paced by the display link when it runs, as the Vulkan layer's acquire: the swap interval in vsyncs\n"
+                  "        uint64_t period = 1000000000ull * vs / 60, now = now_ns();"
+              )
+              new_gl = (
                   "        int fps_t = mtl_fps_target();\n"
                   "        int vs = (fps_t >= 60) ? 1 : (S.swap_interval < 1 ? 1 : S.swap_interval > 4 ? 4 : S.swap_interval);\n"
                   "        int k = g_win.cur, prev = (k + NWIN - 1) % NWIN;\n"
                   "        if (g_win.ticket[prev]) mtl_present_wait(g_win.ticket[prev]);\n"
                   "        g_win.ticket[k] = mtl_present_ext(g_win.serial[k], (fps_t >= 120) ? (1.0 / 120.0) : (vs / 60.0), (__bridge void *)g_ev, v, NULL);\n"
                   "        g_win.cur = (k + 1) % NWIN;\n"
-                  "        if (g_win.ticket[g_win.cur]) mtl_present_wait(g_win.ticket[g_win.cur]);",
-              ).replace(
-                  "uint64_t period = 1000000000ull * vs / 60, now = now_ns();",
-                  "uint64_t period = (fps_t >= 120) ? (1000000000ull / 120) : (1000000000ull * vs / 60), now = now_ns();",
+                  "        if (g_win.ticket[g_win.cur]) mtl_present_wait(g_win.ticket[g_win.cur]);   // its previous present has been shown, so drawing into it again is safe\n"
+                  "        // Paced by the display link when it runs, as the Vulkan layer's acquire: the swap interval in vsyncs\n"
+                  "        uint64_t period = (fps_t >= 120) ? (1000000000ull / 120) : (1000000000ull * vs / 60), now = now_ns();"
               )
+              assert txt.count(old_gl) <= 1 and txt.count(new_gl) <= 1, "OpenGL swap patch is ambiguous"
+              if old_gl in txt:
+                  txt = txt.replace(old_gl, new_gl, 1)
+                  print("OpenGL swap patch: matched legacy layout.")
+              elif new_gl in txt:
+                  print("OpenGL swap patch: already applied.")
+              else:
+                  print("OpenGL swap patch: newer or unknown layout; preserving engine pacing and synchronization.")
               hle_gl_m.write_text(txt, encoding="utf-8")
 
           # 2. Default game language to UK English (en-GB), enable iOS 17.0 CAMetalDisplayLink target & A12Z LSE atomics
