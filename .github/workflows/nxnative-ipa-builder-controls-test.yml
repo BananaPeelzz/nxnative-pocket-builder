@@ -2511,7 +2511,7 @@ jobs:
           name: NxNative-RomFS-${{ env.DETECTED_TITLE_ID }}
           path: ${{ env.ROMFS_IMAGE_PATH }}
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
           compression-level: 0
 
       - name: Report separate RomFS download
@@ -2523,7 +2523,7 @@ jobs:
           set -euo pipefail
           [[ -n "$ARTIFACT_URL" ]] || { echo "::error::RomFS artifact URL is missing."; exit 1; }
           echo "## RomFS artifact" >> "$GITHUB_STEP_SUMMARY"
-          echo "- [Download the separate RomFS artifact]($ARTIFACT_URL) (GitHub ZIP; appropriate access required)." >> "$GITHUB_STEP_SUMMARY"
+          echo "- [Download the separate RomFS artifact]($ARTIFACT_URL) (GitHub ZIP; retained for 1 day; appropriate access required)." >> "$GITHUB_STEP_SUMMARY"
           echo '- Extract the ZIP and rename RomFS.img to romfs.img; copy it into this game’s Documents folder after installing the matching IPA.' >> "$GITHUB_STEP_SUMMARY"
           echo '- Keep this image and the IPA from this run together. The image alone is not an app, and an uploaded image does not mean the IPA build succeeded.' >> "$GITHUB_STEP_SUMMARY"
           echo '- DLC remains handled by the engine and is not included in this base/update RomFS artifact.' >> "$GITHUB_STEP_SUMMARY"
@@ -2696,50 +2696,113 @@ jobs:
               f.write(text)
           PY
 
-      - name: Publish GoFile download page
+      - name: Publish temporary GoFile download page
         if: success() && inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && vars.GOFILE_UPLOAD != 'false'
         continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          OUTPUT="$RUNNER_TEMP/$IPA_FILENAME"
-          echo "::warning::GoFile creates a public share link. A bundled IPA can include game files."
-          echo "Uploading to GoFile; if the Singapore endpoint fails, the global endpoint is tried."
-          DOWNLOAD_URL=""
-          for endpoint in https://upload-ap-sgp.gofile.io/uploadfile https://upload.gofile.io/uploadfile; do
-            response_file="$(mktemp "$RUNNER_TEMP/gofile-response.XXXXXX")"
-            chmod 600 "$response_file"
-            if curl -fsS --retry 2 --connect-timeout 30 --max-time 3600 -F "file=@$OUTPUT" -o "$response_file" "$endpoint" 2>/dev/null; then
-              DOWNLOAD_URL="$(python - "$response_file" <<'PYTHON'
-          import json, re, sys
+          python - <<'PYTHON'
+          import json, os, re, subprocess, tempfile, time
+          from pathlib import Path
           from urllib.parse import urlsplit
+          from urllib.request import Request, urlopen
+
+          output = Path(os.environ['RUNNER_TEMP']) / os.environ['IPA_FILENAME']
+          summary = Path(os.environ['GITHUB_STEP_SUMMARY'])
+          api = 'https://api.gofile.io'
+          token = None
+          folder = None
+          expiry = None
+          published = False
+
+          # Never print the account token or raw API responses to the public job log.
+          def call(method, path, body, credential=None):
+              payload = json.dumps(body).encode('utf-8')
+              headers = {'Content-Type': 'application/json'}
+              if credential: headers['Authorization'] = 'Bearer ' + credential
+              req = Request(api + path, data=payload, headers=headers, method=method)
+              with urlopen(req, timeout=40) as response:
+                  result = json.load(response)
+              if result.get('status') != 'ok': raise RuntimeError('GoFile API rejected a request')
+              return result.get('data', {})
+
+          def valid_uuid(s):
+              return isinstance(s, str) and re.fullmatch(r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}', s) is not None
+
+          def set_expiry(when):
+              data = call('PUT', '/contents/' + folder + '/update',
+                          {'attribute': 'expiry', 'attributeValue': when}, token)
+              if data.get('expire') != when: raise RuntimeError('GoFile did not confirm expiry')
+
           try:
-              with open(sys.argv[1], encoding='utf-8') as f: data = json.load(f)
-              url = data.get('data', {}).get('downloadPage', '') if data.get('status') == 'ok' else ''
-              parts = urlsplit(url)
-              if parts.scheme == 'https' and parts.netloc == 'gofile.io' and re.fullmatch(r'/d/[A-Za-z0-9_-]{4,}', parts.path) and not parts.query and not parts.fragment:
-                  print(url)
-          except (OSError, ValueError, TypeError, AttributeError):
-              pass
+              # The old anonymous upload also created a guest account per upload. Here it
+              # is created first so the folder can expire BEFORE any file is uploaded.
+              account = call('POST', '/accounts', {})
+              token, root = account.get('token'), account.get('rootFolder')
+              if not isinstance(token, str) or not token or '\n' in token or '\r' in token or not valid_uuid(root):
+                  raise RuntimeError('GoFile guest account response was incomplete')
+              created = call('POST', '/contents/createFolder',
+                             {'parentFolderId': root, 'folderName': 'NxNative temporary IPA', 'public': True}, token)
+              folder = created.get('id')
+              if not valid_uuid(folder): raise RuntimeError('GoFile folder response was incomplete')
+              expiry = int(time.time()) + 5 * 60 * 60
+              set_expiry(expiry)  # fail closed: never upload into a folder without a confirmed expiry
+              with tempfile.TemporaryDirectory(prefix='nx-gofile-', dir=os.environ['RUNNER_TEMP']) as tmp:
+                  config = Path(tmp) / 'curl.conf'
+                  response_path = Path(tmp) / 'response.json'
+                  # Token is in a mode-0600 file, not the process arguments or console.
+                  fd = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                  with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                      f.write('header = ' + json.dumps('Authorization: Bearer ' + token) + '\n')
+                      f.write('form = ' + json.dumps('folderId=' + folder) + '\n')
+                      f.write('form = ' + json.dumps('file=@' + str(output)) + '\n')
+                  data = None
+                  for endpoint in ('https://upload-ap-sgp.gofile.io/uploadfile', 'https://upload.gofile.io/uploadfile'):
+                      response_path.unlink(missing_ok=True)
+                      result = subprocess.run(['curl', '--silent', '--show-error', '--fail', '--connect-timeout', '30',
+                                               '--max-time', '3600', '--config', str(config), '--output', str(response_path), endpoint],
+                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                      if result.returncode == 0 and response_path.is_file():
+                          try:
+                              candidate = json.loads(response_path.read_text(encoding='utf-8'))
+                              d = candidate.get('data', {})
+                              if candidate.get('status') == 'ok' and d.get('parentFolder') == folder:
+                                  data = d; break
+                          except (OSError, ValueError, TypeError, AttributeError): pass
+                  if not data: raise RuntimeError('GoFile upload failed')
+                  url = data.get('downloadPage', '')
+                  parts = urlsplit(url)
+                  if (parts.scheme != 'https' or parts.netloc != 'gofile.io' or parts.query or parts.fragment
+                          or not re.fullmatch(r'/d/[A-Za-z0-9_-]{4,}', parts.path)):
+                      raise RuntimeError('GoFile download page was invalid')
+              # Prefer five hours from the completed upload; the earlier verified expiry
+              # remains a safe upper bound if this refresh fails.
+              try:
+                  later_expiry = int(time.time()) + 5 * 60 * 60
+                  set_expiry(later_expiry)
+                  expiry = later_expiry
+              except Exception:
+                  print('::warning::Could not refresh GoFile expiry after upload; the earlier confirmed expiry still applies.')
+              published = True
+              when = time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(expiry))
+              print('GoFile download page:', url)
+              with summary.open('a', encoding='utf-8') as f:
+                  f.write('\n## Temporary GoFile IPA download\n')
+                  f.write(f'- [Open the IPA download page]({url})\n')
+                  f.write(f'- Folder expiry requested and confirmed by GoFile: {when} (about 5 hours).\n')
+                  f.write('- Public until expiry; anyone with access may download and keep a copy. The GoFile page is not a guaranteed direct file URL.\n')
+          except Exception:
+              # Never print exceptions: a server response could contain a credential.
+              print('::warning::GoFile upload or expiry setup failed; check the one-day GitHub IPA artifact instead.')
+          finally:
+              if not published and token and valid_uuid(folder):
+                  try:
+                      call('DELETE', '/contents', {'contentsId': folder}, token)
+                  except Exception:
+                      # If deletion fails, a previously confirmed folder expiry still applies.
+                      print('::warning::GoFile cleanup could not be confirmed; any created folder may remain until its expiry.')
           PYTHON
-              )"
-            fi
-            rm -f "$response_file"
-            [[ -n "$DOWNLOAD_URL" ]] && break
-            echo "GoFile endpoint did not return a valid download page; trying the next endpoint if available."
-          done
-          if [[ -n "$DOWNLOAD_URL" ]]; then
-            echo "GoFile download page: $DOWNLOAD_URL"
-            {
-              echo "## GoFile download page"
-              echo "- [Open the IPA download page]($DOWNLOAD_URL)"
-              echo "- This is a GoFile page, not a guaranteed direct file URL. Availability and access depend on GoFile."
-              echo "- The link is public; a bundled IPA can contain game files. Check the SHA-256 shown above after downloading."
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "::warning::GoFile upload failed; check the GitHub artifact fallback."
-            echo "GoFile upload failed. Check the GitHub artifact fallback below." >> "$GITHUB_STEP_SUMMARY"
-          fi
 
       - name: Upload IPA
         id: ipa_artifact
@@ -2750,7 +2813,7 @@ jobs:
           name: ${{ env.IPA_FILENAME }}
           path: ${{ runner.temp }}/${{ env.IPA_FILENAME }}
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
 
       - name: Report IPA artifact fallback
         if: always() && inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && steps.ipa_artifact.outcome != 'skipped'
@@ -2761,7 +2824,7 @@ jobs:
         run: |
           if [[ "$ARTIFACT_OUTCOME" == "success" && -n "$ARTIFACT_URL" ]]; then
             echo "## GitHub artifact fallback" >> "$GITHUB_STEP_SUMMARY"
-            echo "- [Download the IPA artifact]($ARTIFACT_URL) (GitHub provides a ZIP and requires appropriate access)." >> "$GITHUB_STEP_SUMMARY"
+            echo "- [Download the IPA artifact]($ARTIFACT_URL) (GitHub provides a ZIP, retained for 1 day, and requires appropriate access)." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "::warning::IPA artifact upload failed. Check its step log."
             echo "IPA artifact upload failed; check the upload step log." >> "$GITHUB_STEP_SUMMARY"
