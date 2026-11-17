@@ -2359,6 +2359,175 @@ jobs:
           path: ${{ runner.temp }}/nxnative-shader-cache
           key: nxnative-shaders-v2-${{ env.SHADER_CACHE_HASH }}
 
+      - name: Extract and stage separate RomFS
+        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && startsWith(inputs.romfs_mode, 'separate')
+        env:
+          ROMFS_MODE_INPUT: ${{ inputs.romfs_mode }}
+          LANG_INPUT: ${{ inputs.language }}
+          SHOW_FPS_INPUT: ${{ inputs.show_fps }}
+          DEVICE_INPUT: ${{ inputs.device }}
+          CACHE_INPUT: ${{ inputs.shader_cache }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/nxnative"
+          GAME_DIR="$RUNNER_TEMP/GameFiles"
+          OUTPUT="$RUNNER_TEMP/$IPA_FILENAME"
+          BUILD_DIR="$GAME_DIR/${DETECTED_TITLE_ID}_build"
+          SHADER_CACHE="$RUNNER_TEMP/nxnative-shader-cache"
+
+          HELP_TEXT="$(python scripts/build_ipa_from_nsp.py --help 2>&1 || true)"
+
+          BUILD_ARGS=("$GAME_DIR" -o "$OUTPUT")
+          if [[ -s "$WORK/prod.keys" ]]; then
+            BUILD_ARGS+=(-k "$WORK/prod.keys")
+          fi
+
+          # Device-specific renderer & pipeline archive settings
+          if [[ "$DEVICE_INPUT" == *"BC fallback"* ]]; then
+            export DM_IOS_RENDERER=legacy
+            export DM_LEGACY_TARGET=m2
+            if grep -q -- "--gpu" <<<"$HELP_TEXT"; then
+              BUILD_ARGS+=(--gpu none)
+            fi
+          elif grep -q -- "--gpu" <<<"$HELP_TEXT"; then
+            # Pre-compile Metal 4 pipeline archive for A19 Pro (g18p) on iPhone 17 Pro builds
+            BUILD_ARGS+=(--gpu g18p)
+          fi
+
+          # RomFS mode: bundle (full all-in-one IPA, delete extracted files after packing)
+          # or separate (IPA without bundled RomFS; size varies by game)
+          if [[ "$ROMFS_MODE_INPUT" == separate* ]]; then
+            export DM_COPY_ROMFS=NO
+            if grep -q -- "--romfs" <<<"$HELP_TEXT"; then
+              BUILD_ARGS+=(--romfs separate)
+            fi
+          else
+            export DM_FULL_ROMFS=1
+            export DM_COPY_ROMFS=YES
+            if grep -q -- "--no-keep-extracted" <<<"$HELP_TEXT"; then
+              BUILD_ARGS+=(--no-keep-extracted)
+            fi
+          fi
+
+          # Optional default game language (unlocked in Start Screen)
+          if [[ -n "${LANG_INPUT// /}" ]]; then
+            BUILD_ARGS+=(-l "${LANG_INPUT// /}")
+          fi
+
+          # Default FPS counter toggle (unlocked in Start Screen)
+          if [[ "$SHOW_FPS_INPUT" == "false" ]] && grep -q -- "--no-show-fps" <<<"$HELP_TEXT"; then
+            BUILD_ARGS+=(--no-show-fps)
+          elif grep -q -- "--show-fps" <<<"$HELP_TEXT"; then
+            BUILD_ARGS+=(--show-fps)
+          fi
+
+          if ! grep -q -- "--romfs" <<<"$HELP_TEXT"; then
+            echo "::error::This engine does not support the verified separate RomFS handoff. No image was uploaded."
+            exit 1
+          fi
+          python - <<'PYTHON'
+          import os, re, textwrap
+          from pathlib import Path
+
+          p = Path('scripts/build_ipa_from_nsp.py')
+          text = p.read_text(encoding='utf-8')
+          matches = list(re.finditer(r'(?m)^([ ]+)game = dirs\[pkg_ver\]\n', text))
+          if len(matches) != 1 or 'NX_ROMFS_HANDOFF_V1' in text:
+              raise SystemExit('Separate RomFS handoff: unsupported engine script; no image uploaded. Bundle mode is unchanged.')
+          code = r"""    # NX_ROMFS_HANDOFF_V1: act only in the separate-mode CI two-pass build.
+              # The selected package version is the one the IPA uses, not an arbitrary
+              # first image from a multi-version extraction. Never copy credentials.
+              if os.environ.get('NX_ROMFS_PHASE') in ('stage', 'resume'):
+                  import hashlib as _handoff_hashlib, json as _handoff_json
+                  _handoff_phase = os.environ['NX_ROMFS_PHASE']
+                  _handoff_rt = Path(os.environ['RUNNER_TEMP']).resolve()
+                  _handoff_root = work.resolve()
+                  _handoff_image = game / 'RomFS.img'
+                  _handoff_meta = _handoff_rt / 'nxnative-romfs-handoff.json'
+                  if (romfs_mode != 'separate' or work.is_symlink()
+                      or work.parent.resolve() != (_handoff_rt / 'GameFiles').resolve()
+                      or not re.fullmatch(r'[A-Za-z0-9_-]+', g.id) or work.name != g.id + '_build'
+                          or not re.fullmatch(r'[0-9A-F]{16}', f'{app:016X}')
+                          or _handoff_image.is_symlink() or not _handoff_image.is_file()
+                          or _handoff_image.stat().st_size <= 0
+                          or not _handoff_image.resolve().is_relative_to((_handoff_root / 'extract').resolve())
+                          or g.get('programs', '') or globals().get('PROGRAM_INDEX', 0)
+                          or getattr(args, 'in_programs', None) is not None):
+                      raise BuildError('Separate RomFS handoff: unsupported or unsafe image, work folder or multi-program game; no image published.')
+                  _handoff_sha = _handoff_hashlib.sha256()
+                  with _handoff_image.open('rb') as _handoff_file:
+                      for _handoff_chunk in iter(lambda: _handoff_file.read(4 * 1024 * 1024), b''):
+                          _handoff_sha.update(_handoff_chunk)
+                  _handoff_data = {'title': f'{app:016X}', 'package_version': str(pkg_ver),
+                                   'path': str(_handoff_image.resolve()), 'size': _handoff_image.stat().st_size,
+                                   'sha256': _handoff_sha.hexdigest()}
+                  if _handoff_phase == 'stage':
+                      _handoff_meta.write_text(_handoff_json.dumps(_handoff_data), encoding='utf-8')
+                      say('Separate RomFS extracted and checked; pausing before shader compilation for artifact upload.')
+                      raise SystemExit(0)
+                  if not _handoff_meta.is_file() or _handoff_json.loads(_handoff_meta.read_text(encoding='utf-8')) != _handoff_data:
+                      raise BuildError('Separate RomFS handoff: selected image changed after upload; refusing to build an IPA against the wrong image.')
+                  say('Separate RomFS: selected image matches the staged artifact (SHA-256 verified).')
+          """
+          match = matches[0]
+          code = textwrap.indent(textwrap.dedent(code), match.group(1))
+          text = text[:match.end()] + code + text[match.end():]
+          compile(text, str(p), 'exec')
+          p.write_text(text, encoding='utf-8')
+          print('Installed guarded separate-RomFS handoff in engine script.')
+          PYTHON
+          NX_ROMFS_PHASE=stage python scripts/build_ipa_from_nsp.py "${BUILD_ARGS[@]}"
+          python - <<'PYTHON'
+          import json, os, re
+          from pathlib import Path
+          rt = Path(os.environ['RUNNER_TEMP']).resolve()
+          meta = rt / 'nxnative-romfs-handoff.json'
+          if not meta.is_file(): raise SystemExit('Separate RomFS staging did not produce a handoff record; nothing uploaded.')
+          data = json.loads(meta.read_text(encoding='utf-8'))
+          p = Path(data['path'])
+          root = rt / 'GameFiles'
+          if (not re.fullmatch(r'[0-9A-F]{16}', data['title']) or data['title'] != os.environ['DETECTED_TITLE_ID']
+                  or p.name != 'RomFS.img' or p.is_symlink() or not p.is_file()
+                  or p.parents[1].name != 'extract' or not p.parents[2].name.endswith('_build')
+                  or p.parents[2].is_symlink() or p.parents[2].parent.resolve() != root.resolve()
+                  or not p.resolve().is_relative_to(root.resolve()) or p.stat().st_size != data['size']
+                  or not re.fullmatch(r'[0-9a-f]{64}', data['sha256'])):
+              raise SystemExit('Separate RomFS handoff record failed safety checks; nothing uploaded.')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as f:
+              f.write('ROMFS_IMAGE_PATH=' + str(p) + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+              f.write('## Separate RomFS image\n')
+              f.write(f'- Title: `{data["title"]}`; package version: `{data["package_version"]}`\n')
+              f.write(f'- Size: {data["size"]:,} bytes; SHA-256: `{data["sha256"]}`\n')
+              f.write('- The image contains game data; artifact access is not private in a public repository.\n')
+          PYTHON
+
+      - name: Upload separate RomFS image
+        id: romfs_artifact
+        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && startsWith(inputs.romfs_mode, 'separate')
+        uses: actions/upload-artifact@v4
+        with:
+          name: NxNative-RomFS-${{ env.DETECTED_TITLE_ID }}
+          path: ${{ env.ROMFS_IMAGE_PATH }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Report separate RomFS download
+        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && startsWith(inputs.romfs_mode, 'separate')
+        env:
+          ARTIFACT_URL: ${{ steps.romfs_artifact.outputs.artifact-url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$ARTIFACT_URL" ]] || { echo "::error::RomFS artifact URL is missing."; exit 1; }
+          echo "## RomFS artifact" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [Download the separate RomFS artifact]($ARTIFACT_URL) (GitHub ZIP; appropriate access required)." >> "$GITHUB_STEP_SUMMARY"
+          echo '- Extract the ZIP and rename RomFS.img to romfs.img; copy it into this game’s Documents folder after installing the matching IPA.' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Keep this image and the IPA from this run together. The image alone is not an app, and an uploaded image does not mean the IPA build succeeded.' >> "$GITHUB_STEP_SUMMARY"
+          echo '- DLC remains handled by the engine and is not included in this base/update RomFS artifact.' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Build unsigned IPA
         if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)'
         env:
@@ -2428,7 +2597,11 @@ jobs:
             BUILD_ARGS+=(--show-fps)
           fi
 
-          python scripts/build_ipa_from_nsp.py "${BUILD_ARGS[@]}"
+          if [[ "$ROMFS_MODE_INPUT" == separate* ]]; then
+            NX_ROMFS_PHASE=resume python scripts/build_ipa_from_nsp.py "${BUILD_ARGS[@]}"
+          else
+            python scripts/build_ipa_from_nsp.py "${BUILD_ARGS[@]}"
+          fi
 
           if [[ ! -s "$OUTPUT" ]]; then
             echo "::error::IPA build did not produce an output file."
@@ -2513,7 +2686,7 @@ jobs:
           except (zipfile.BadZipFile, OSError, ValueError, plistlib.InvalidFileException) as e:
               raise SystemExit(f'Could not inspect IPA metadata ({type(e).__name__}); publishing stopped. Check the build logs.')
           if os.environ.get('ROMFS_INPUT', '').startswith('separate'):
-              lines += ['- Separate mode was requested. Obtain a compatible image from your own game; this workflow does not upload a separate RomFS.', '- For engines supporting it, place the matching image as `romfs.img` in the app’s Documents folder. Check the engine’s instructions and your sideloader’s file location.']
+              lines += ['- Separate mode: download the RomFS artifact from this run, extract it, and rename the image to `romfs.img`.', '- Place it in this game app’s Documents folder; the location depends on your sideloader. The image contains game data.']
           else:
               lines.append('- Bundle mode was requested; check build logs if the selected engine uses different packaging rules.')
           lines.append('')
