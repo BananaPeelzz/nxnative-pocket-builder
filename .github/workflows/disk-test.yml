@@ -2283,6 +2283,43 @@ jobs:
                       say('Disk-saving test: unsupported input combination; package copies kept.')
           '''
           text = text.replace(anchor, addition + anchor, 1)
+          # This second insertion is after build_shaders has returned successfully.
+          post_anchor = '    motion = MOTION if args.motion is None else args.motion\n'
+          if text.count(post_anchor) != 1:
+              raise SystemExit('Disk-saving test: post-shader cleanup location changed.')
+          post = '''    # Release the disposable compile database only after the entire iOS shader
+              # stage succeeds. Keep the finished iOS and Mac libraries and RomFS intact.
+              # CACHE_INPUT=false explicitly opts out of saving or restoring this database.
+              if (app == 0x0100606026F12000 and gfx == 'nvn' and not mac and not mac_pack
+                      and from_seed_arg is None and not nup and not dump and not fam.get('dlc')
+                      and not g.get('programs', '') and not PROGRAM_INDEX
+                      and getattr(args, 'in_programs', None) is None
+                      and os.environ.get('CACHE_INPUT', '').lower() == 'false'):
+                  rt = os.environ.get('RUNNER_TEMP', '')
+                  target_work = Path(rt).resolve() / 'GameFiles' / '0100606026F12000_build' if rt else None
+                  cache_dir = sh / 'cache'
+                  chain = chain_of(repo)
+                  expected = target_work / 'shader' / 'cache' if target_work else None
+                  ios_img = ios / f'b-{chain}.img'
+                  safe = (expected is not None and work.resolve() == target_work and sh.resolve() == target_work / 'shader'
+                          and not cache_dir.is_symlink() and cache_dir.is_dir() and cache_dir.resolve() == expected
+                          and not ios.is_symlink() and ios.resolve() == target_work / 'shader' / 'ios'
+                          and bool(re.fullmatch(r'[0-9a-f]{12}', chain or ''))
+                          and not ios_img.is_symlink() and ios_img.is_file() and ios_img.stat().st_size > 0)
+                  paths = [cache_dir / f'cas-{chain}.db{suffix}' for suffix in ('', '-wal', '-shm')] if safe else []
+                  safe = safe and all(not p.is_symlink() and (not p.exists() or p.is_file()) for p in paths)
+                  if safe:
+                      before = shutil.disk_usage(cache_dir).free
+                      removed = sum(p.stat().st_size for p in paths if p.is_file())
+                      for p in paths: p.unlink(missing_ok=True)
+                      after = shutil.disk_usage(cache_dir).free
+                      say(f'Disk-saving test: removed completed shader compile database ({removed / 1e9:.2f} GB logical); free space {before / 1e9:.2f} -> {after / 1e9:.2f} GB. Finished libraries and game image kept.')
+                  else:
+                      say('Disk-saving test: shader database safety checks did not match; database kept.')
+              elif app == 0x0100606026F12000:
+                  say('Disk-saving test: shader database kept (shared cache enabled or input combination unsupported).')
+          '''
+          text = text.replace(post_anchor, post + post_anchor, 1)
           compile(text, str(path), 'exec')
           path.write_text(text, encoding='utf-8')
           print('Disk-saving test: guarded cleanup installed for this audited game and engine.')
