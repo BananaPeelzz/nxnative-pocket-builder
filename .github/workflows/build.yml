@@ -156,13 +156,14 @@ jobs:
               "            romfs = str(rfs.source(d))",
               "            print('\\n[UE DIAGNOSTICS] No decoded Unreal shader archives.', flush=True)",
               "            print(f'[UE DIAGNOSTICS] RomFS: {romfs}', flush=True)",
-              "            for root, _, files in os.walk(romfs):",
+              "            # RomFS.img is a DMROMFS1 virtual filesystem; use the engine's RomFS-aware walker, not Python os.walk.",
+              "            for root, _, files in rfs.os.walk(romfs):",
               "                for name in sorted(files):",
-              "                    if name.lower().endswith(('.utoc', '.ucas', '.pak')):",
+              "                    if name.lower().endswith(('.utoc', '.ucas', '.pak', '.ushaderbytecode')):",
               "                        full = os.path.join(root, name)",
-              "                        try: size = os.path.getsize(full)",
+              "                        try: size = rfs.os.path.getsize(full)",
               "                        except OSError: size = -1",
-              "                        print(f'[UE DIAGNOSTICS] {name.rsplit(\".\", 1)[-1].upper()} {os.path.relpath(full, romfs)} size={size}', flush=True)",
+              "                        print(f'[UE DIAGNOSTICS] {name.rsplit(\".\", 1)[-1].upper()} {rfs.os.path.relpath(full, romfs)} size={size}', flush=True)",
               "            raise BuildError(f'the RomFS has Unreal paks, but no decoded shader code archive was found under {romfs}; see [UE DIAGNOSTICS] above')",
           ])
           if needle not in source:
