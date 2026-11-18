@@ -7,10 +7,10 @@ on:
         description: "Choose the target device and engine version"
         required: true
         type: choice
-        default: "iPhone 15 Pro/Pro Max or newer - NX2Apple Patched (Default)"
+        default: "iPhone 15 Pro/Pro Max (A17 Pro) - NX2Apple Patched (Default)"
         options:
-          - "iPhone 15 Pro/Pro Max or newer - NX2Apple Patched (Default)"
-          - "iPhone 15 Pro/Pro Max or newer (standard)"
+          - "iPhone 15 Pro/Pro Max (A17 Pro) - NX2Apple Patched (Default)"
+          - "iPhone 15 Pro/Pro Max (A17 Pro) (standard)"
           - "iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)"
       build_mode:
         description: "Build full IPA or run a fast 2-minute compatibility survey"
@@ -98,14 +98,14 @@ jobs:
           fi
 
       - name: Checkout NX2Apple patched engine (Default)
-        if: inputs.device == 'iPhone 15 Pro/Pro Max or newer - NX2Apple Patched (Default)'
+        if: inputs.device == 'iPhone 15 Pro/Pro Max (A17 Pro) - NX2Apple Patched (Default)'
         uses: actions/checkout@v4
         with:
           repository: LNPANDY/NX2Apple
           ref: main
 
       - name: Checkout standard nxnative version
-        if: inputs.device == 'iPhone 15 Pro/Pro Max or newer (standard)'
+        if: inputs.device == 'iPhone 15 Pro/Pro Max (A17 Pro) (standard)'
         uses: actions/checkout@v4
         with:
           repository: seedds/nxnative
@@ -125,7 +125,7 @@ jobs:
           python-version: "3.13"
 
       - name: Sync NX2Apple engine patches
-        if: inputs.device == 'iPhone 15 Pro/Pro Max or newer - NX2Apple Patched (Default)'
+        if: inputs.device == 'iPhone 15 Pro/Pro Max (A17 Pro) - NX2Apple Patched (Default)'
         shell: bash
         run: |
           set -euo pipefail
@@ -2436,8 +2436,8 @@ jobs:
               BUILD_ARGS+=(--gpu none)
             fi
           elif grep -q -- "--gpu" <<<"$HELP_TEXT"; then
-            # Pre-compile Metal 4 pipeline archive for A19 Pro (g18p) on iPhone 17 Pro builds
-            BUILD_ARGS+=(--gpu g18p)
+                  # Pre-compile the Metal 4 pipeline archive for iPhone 15 Pro/Pro Max (A17 Pro, g17p)
+            BUILD_ARGS+=(--gpu g17p)
           fi
 
           # RomFS mode: bundle (full all-in-one IPA, delete extracted files after packing)
@@ -2611,8 +2611,8 @@ jobs:
               BUILD_ARGS+=(--gpu none)
             fi
           elif grep -q -- "--gpu" <<<"$HELP_TEXT"; then
-            # Pre-compile Metal 4 pipeline archive for A19 Pro (g18p) on iPhone 17 Pro builds
-            BUILD_ARGS+=(--gpu g18p)
+                  # Pre-compile the Metal 4 pipeline archive for iPhone 15 Pro/Pro Max (A17 Pro, g17p)
+            BUILD_ARGS+=(--gpu g17p)
           fi
 
           # RomFS mode: bundle (full all-in-one IPA, delete extracted files after packing)
