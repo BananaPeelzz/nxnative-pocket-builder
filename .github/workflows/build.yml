@@ -2463,7 +2463,7 @@ jobs:
               BUILD_ARGS+=(--gpu none)
             fi
           elif grep -q -- "--gpu" <<<"$HELP_TEXT"; then
-                  # Pre-compile the Metal 4 pipeline archive for iPhone 15 Pro/Pro Max (A17 Pro, g17p)
+            # Pre-compile the Metal 4 pipeline archive for iPhone 15 Pro/Pro Max (A17 Pro, g17p)
             BUILD_ARGS+=(--gpu g17p)
           fi
 
@@ -2639,7 +2639,7 @@ jobs:
               BUILD_ARGS+=(--gpu none)
             fi
           elif grep -q -- "--gpu" <<<"$HELP_TEXT"; then
-                  # Pre-compile the Metal 4 pipeline archive for iPhone 15 Pro/Pro Max (A17 Pro, g17p)
+            # Pre-compile the Metal 4 pipeline archive for iPhone 15 Pro/Pro Max (A17 Pro, g17p)
             BUILD_ARGS+=(--gpu g17p)
           fi
 
