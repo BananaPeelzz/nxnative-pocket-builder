@@ -116,7 +116,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: widmonstertony/nxnative
-          ref: ios16-ios17-compat
+          # Keep the legacy renderer and its shader translator on the same tested source revision.
+          ref: b5ac83de5c3c01ab30b3e0dbac8eaf32fe2f9b14
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -2164,6 +2165,35 @@ jobs:
           fi
 
           python "$CHAIN_SCRIPT" --header
+
+          # Fail before extraction/compilation if this older-device engine expects
+          # a different legacy shader chain. Never relabel shader libraries.
+          if [[ "$CACHE_DEVICE" == *"BC fallback"* ]]; then
+            python - <<'PY'
+          from pathlib import Path
+          import re
+          packer = Path('dm/ios/tools/build_ipa.sh')
+          generated = Path('dm/gfx/nvn/dmsh_chain.h')
+          legacy = Path('dm/gfx/nvn/legacy/dmsh_chain.h')
+          def chain(path):
+              if not path.is_file():
+                  raise SystemExit(f'::error::Missing shader chain header: {path}')
+              hits = re.findall(r'^#define\s+DMSH_CHAIN\s+"([a-fA-F0-9]+)"\s*$', path.read_text(), re.M)
+              if len(hits) != 1:
+                  raise SystemExit(f'::error::Invalid shader chain header: {path}')
+              return hits[0]
+          if not packer.is_file():
+              raise SystemExit('::error::Missing iOS packer; cannot check shader compatibility')
+          current = chain(generated)
+          text = packer.read_text()
+          if 'gfx/nvn/legacy/dmsh_chain.h' in text:
+              expected = chain(legacy)
+              if current != expected:
+                  raise SystemExit(f'::error::Older-device shader chain mismatch before compilation: generated {current}, legacy renderer {expected}. Use a matching engine and translator; do not rename libraries.')
+          print(f'Older-device shader chain preflight passed: {current}. Resource and gameplay compatibility are not established.')
+          PY
+          fi
+
           CHAIN_ID="$(python - <<'PY'
           import re
           from pathlib import Path
@@ -2805,3 +2835,4 @@ jobs:
             "$RUNNER_TEMP/nxnative" \
             "$RUNNER_TEMP/GameFiles" \
             "$RUNNER_TEMP/nxnative-redacted-logs"
+
