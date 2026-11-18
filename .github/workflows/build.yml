@@ -34,7 +34,7 @@ on:
         type: boolean
         default: false
       game_url:
-        description: "Google Drive folder with base game, update and DLCs, or a single base-game package (blank = Game_URL secret)"
+        description: "Google Drive or Dropbox shared folder with base game, update and DLCs, or a single base-game package (blank = Game_URL secret)"
         required: false
         type: string
         default: ""
