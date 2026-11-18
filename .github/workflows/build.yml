@@ -151,34 +151,20 @@ jobs:
           path = Path("scripts/build_ipa_from_nsp.py")
           source = path.read_text()
           needle = "        if not listing: raise BuildError(f'the RomFS has Unreal paks, but none under {rfs.source(d)} holds a shader code archive: where the shaders are has to be found first')"
-          replacement = """        if not listing:
-              romfs = str(rfs.source(d))
-              print('\\n[UE DIAGNOSTICS] Unreal shader archive discovery returned no archives.', flush=True)
-              print(f'[UE DIAGNOSTICS] RomFS: {romfs}', flush=True)
-              print(f'[UE DIAGNOSTICS] Manifest shader archive names: {uepak.archive_names(romfs)}', flush=True)
-              for root, _, files in os.walk(romfs):
-                  for name in sorted(files):
-                      if name.lower().endswith(('.utoc', '.ucas', '.pak')):
-                          full = os.path.join(root, name)
-                          try: size = os.path.getsize(full)
-                          except OSError: size = -1
-                          if name.lower().endswith('.utoc'):
-                              try:
-                                  toc = uepak.Toc(full)
-                                  from collections import Counter
-                                  types = dict(sorted(Counter(c[11] for c in toc.ids).items()))
-                                  print(f'[UE DIAGNOSTICS] TOC {os.path.relpath(full, romfs)} size={size} version={toc.version} encrypted={toc.encrypted} chunks={len(toc.ids)} chunk_types={types} shader_library_indices={toc.of_type(uepak.IO_SHADER_LIBRARY)} shader_code_indices={toc.of_type(uepak.IO_SHADER_CODE)} methods={toc.methods}', flush=True)
-                              except Exception as exc:
-                                  print(f'[UE DIAGNOSTICS] TOC {os.path.relpath(full, romfs)} size={size} PARSE_ERROR={type(exc).__name__}: {exc}', flush=True)
-                          elif name.lower().endswith('.pak'):
-                              try:
-                                  inline = uepak.inline_shaders(full)
-                                  print(f'[UE DIAGNOSTICS] PAK {os.path.relpath(full, romfs)} size={size} inline_shaders={inline}', flush=True)
-                              except Exception as exc:
-                                  print(f'[UE DIAGNOSTICS] PAK {os.path.relpath(full, romfs)} size={size} CLASSIFY_ERROR={type(exc).__name__}: {exc}', flush=True)
-                          else:
-                              print(f'[UE DIAGNOSTICS] UCAS {os.path.relpath(full, romfs)} size={size}', flush=True)
-              raise BuildError(f'the RomFS has Unreal paks, but none under {romfs} holds a shader code archive: see [UE DIAGNOSTICS] above to identify the container format')"""
+          replacement = "\\n".join([
+              "        if not listing:",
+              "            romfs = str(rfs.source(d))",
+              "            print('\\\\n[UE DIAGNOSTICS] No decoded Unreal shader archives.', flush=True)",
+              "            print(f'[UE DIAGNOSTICS] RomFS: {romfs}', flush=True)",
+              "            for root, _, files in os.walk(romfs):",
+              "                for name in sorted(files):",
+              "                    if name.lower().endswith(('.utoc', '.ucas', '.pak')):",
+              "                        full = os.path.join(root, name)",
+              "                        try: size = os.path.getsize(full)",
+              "                        except OSError: size = -1",
+              "                        print(f'[UE DIAGNOSTICS] {name.rsplit(\".\", 1)[-1].upper()} {os.path.relpath(full, romfs)} size={size}', flush=True)",
+              "            raise BuildError(f'the RomFS has Unreal paks, but no decoded shader code archive was found under {romfs}; see [UE DIAGNOSTICS] above')",
+          ])
           if needle not in source:
               raise SystemExit("Expected UE shader failure line was not found; refusing to modify an unexpected engine version.")
           path.write_text(source.replace(needle, replacement, 1))
