@@ -309,7 +309,12 @@ jobs:
                 if [[ "$kind" == "folder" ]]; then
                   mkdir -p "$output"
                   if ! HOME="$gdown_home" gdown --folder "$target_id" -O "$output" >"$download_log" 2>&1; then
-                    echo "::error::Google Drive folder download failed. Check sharing and access."
+                    echo "::error::Google Drive folder download failed. Redacted downloader diagnostics follow."
+                    echo "---- gdown diagnostics (last 60 lines; URLs and long IDs redacted) ----"
+                    sed -E \
+                      -e 's#https?://[^[:space:]]+# [URL REDACTED]#g' \
+                      -e 's/[A-Za-z0-9_-]{25,}/[ID REDACTED]/g' \
+                      "$download_log" | tail -n 60
                     exit 1
                   fi
                   if [[ ! -d "$output" ]] || [[ -z "$(ls -A "$output" 2>/dev/null)" ]]; then
