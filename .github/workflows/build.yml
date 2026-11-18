@@ -348,18 +348,49 @@ jobs:
                   df -h "$RUNNER_TEMP"
                   echo "Downloaded Dropbox ZIP size:"
                   du -sh "$archive" || true
-                  if ! unzip -oq "$archive" -d "$output" >"$download_log" 2>&1; then
+                  # Open the ZIP first, then unlink it while its file handle stays open.
+                  # This frees the 18+ GB archive space during extraction on macOS.
+                  if ! python - "$archive" "$output" <<'PYZIP' >"$download_log" 2>&1
+import os, sys, zipfile
+from pathlib import Path, PurePosixPath
+archive, output = Path(sys.argv[1]), Path(sys.argv[2])
+root = output.resolve()
+with zipfile.ZipFile(archive) as zf:
+    members = zf.infolist()
+    archive.unlink(missing_ok=True)
+    for info in members:
+        name = info.filename.replace("\\", "/")
+        rel = PurePosixPath(name)
+        if not name or name in ("/", ".") or rel.is_absolute():
+            continue
+        if any(part in ("", ".", "..") for part in rel.parts):
+            raise RuntimeError(f"Unsafe ZIP path rejected: {name!r}")
+        target = root.joinpath(*rel.parts)
+        if not target.resolve().is_relative_to(root):
+            raise RuntimeError(f"ZIP path escapes destination: {name!r}")
+        if info.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with zf.open(info) as src, target.open("wb") as dst:
+            while True:
+                chunk = src.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+print(f"Extracted {len(members)} ZIP entries.")
+PYZIP
+                  then
                     echo "::error::Could not extract the Dropbox folder ZIP. Extraction diagnostics:"
                     tail -n 50 "$download_log" || true
                     echo "Disk space after failed extraction:"
                     df -h "$RUNNER_TEMP"
-                    echo "Downloaded ZIP and partially extracted folder sizes:"
-                    du -sh "$archive" "$output" 2>/dev/null || true
+                    echo "Partially extracted folder size:"
+                    du -sh "$output" 2>/dev/null || true
                     exit 1
                   fi
                   echo "Disk space after Dropbox extraction:"
                   df -h "$RUNNER_TEMP"
-                  rm -f "$archive"
                   if [[ -z "$(ls -A "$output" 2>/dev/null)" ]]; then
                     echo "::error::Downloaded Dropbox folder is empty."
                     exit 1
