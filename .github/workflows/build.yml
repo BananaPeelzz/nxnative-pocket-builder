@@ -424,6 +424,34 @@ jobs:
             wait "$pid"
           done
 
+          # If prod.keys was included inside the downloaded game folder, locate it
+          # there and stage it in the standard private keys path.
+          if [[ ! -f "$WORK/prod.keys" ]]; then
+            python - "$WORK" <<'PYTHON'
+          import shutil, sys
+          from pathlib import Path
+
+          work = Path(sys.argv[1])
+          roots = [work / name for name in ("game.download", "update.download", "dlc.download")]
+          matches = []
+          for root in roots:
+              if root.is_dir():
+                  matches.extend(p for p in root.rglob("*")
+                                 if p.is_file() and not p.is_symlink()
+                                 and p.name.lower() == "prod.keys")
+          if len(matches) > 1:
+              raise SystemExit("Found multiple prod.keys files in the downloaded folders; keep only one to avoid using the wrong keys.")
+          if matches:
+              source = matches[0]
+              if source.stat().st_size == 0 or source.stat().st_size > 2_000_000:
+                  raise SystemExit("The prod.keys file found in the game folder is empty or unexpectedly large.")
+              shutil.copy2(source, work / "prod.keys")
+              print("Found prod.keys inside the downloaded game folder; using it.")
+          else:
+              print("No prod.keys found in downloaded folders.")
+          PYTHON
+          fi
+
           if [[ -f "$WORK/prod.keys" ]]; then
             chmod 600 "$WORK/prod.keys"
             # Register key values for masking before invoking extraction/build tools.
