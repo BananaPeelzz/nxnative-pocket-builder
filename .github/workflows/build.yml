@@ -151,10 +151,10 @@ jobs:
           path = Path("scripts/build_ipa_from_nsp.py")
           source = path.read_text()
           needle = "        if not listing: raise BuildError(f'the RomFS has Unreal paks, but none under {rfs.source(d)} holds a shader code archive: where the shaders are has to be found first')"
-          replacement = "\\n".join([
+          replacement = "\n".join([
               "        if not listing:",
               "            romfs = str(rfs.source(d))",
-              "            print('\\\\n[UE DIAGNOSTICS] No decoded Unreal shader archives.', flush=True)",
+              "            print('\\n[UE DIAGNOSTICS] No decoded Unreal shader archives.', flush=True)",
               "            print(f'[UE DIAGNOSTICS] RomFS: {romfs}', flush=True)",
               "            for root, _, files in os.walk(romfs):",
               "                for name in sorted(files):",
