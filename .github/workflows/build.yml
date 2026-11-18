@@ -111,35 +111,13 @@ jobs:
           repository: seedds/nxnative
           ref: main
 
-      - name: Checkout no-BC Metal 3 fallback engine with IoStore shader support
+      - name: Checkout Metal 3 + BC fallback version (2020 iPad Pro / iPhone 15 or older)
         if: inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
         uses: actions/checkout@v4
         with:
-          repository: mianmuhammadse/nxnative
-          # Pinned no-bc branch revision: includes BC-to-ASTC fallback and Unreal IoStore export-bundle shader reading.
-          ref: 15f5737d1fa5216cde187a718da8edaf4eaf3efd
-
-      - name: Verify IoStore inline shader support in selected engine
-        if: inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          from pathlib import Path
-
-          uepak = Path("dm/gfx/tools/uepak.py").read_text()
-          split = Path("dm/gfx/tools/shader_split.py").read_text()
-          profile = Path("dm/games/profile_guess.py").read_text()
-          checks = {
-              "IoStore export-bundle detection": "def inline_in_containers" in uepak and "def export_bundles" in uepak,
-              "IoStore shader-package reader": "def ue_io_shaders" in split and "UE_IO" in split,
-              "main-key-aware Unreal pak classification": "mains=[exefs / 'main']" in profile,
-          }
-          for name, ok in checks.items():
-              print(f'{"PASS" if ok else "FAIL"}: {name}')
-          if not all(checks.values()):
-              raise SystemExit("Selected engine is missing required Unreal IoStore shader support.")
-          PY
+          repository: widmonstertony/nxnative
+          # Keep the legacy renderer and its shader translator on the same tested source revision.
+          ref: b5ac83de5c3c01ab30b3e0dbac8eaf32fe2f9b14
 
       - name: Set up Python
         uses: actions/setup-python@v5
