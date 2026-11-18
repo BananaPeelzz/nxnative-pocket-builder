@@ -344,10 +344,21 @@ jobs:
                     echo "::error::Dropbox did not return a valid folder ZIP. Check that the link is a shared-folder link, not a file link."
                     exit 1
                   fi
+                  echo "Disk space before Dropbox extraction:"
+                  df -h "$RUNNER_TEMP"
+                  echo "Downloaded Dropbox ZIP size:"
+                  du -sh "$archive" || true
                   if ! unzip -oq "$archive" -d "$output" >"$download_log" 2>&1; then
-                    echo "::error::Could not extract the Dropbox folder ZIP."
+                    echo "::error::Could not extract the Dropbox folder ZIP. Extraction diagnostics:"
+                    tail -n 50 "$download_log" || true
+                    echo "Disk space after failed extraction:"
+                    df -h "$RUNNER_TEMP"
+                    echo "Downloaded ZIP and partially extracted folder sizes:"
+                    du -sh "$archive" "$output" 2>/dev/null || true
                     exit 1
                   fi
+                  echo "Disk space after Dropbox extraction:"
+                  df -h "$RUNNER_TEMP"
                   rm -f "$archive"
                   if [[ -z "$(ls -A "$output" 2>/dev/null)" ]]; then
                     echo "::error::Downloaded Dropbox folder is empty."
