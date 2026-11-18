@@ -262,14 +262,20 @@ jobs:
               if file_id:
                   results.append(f"{kind}:{file_id}:{token}")
               elif parsed.scheme.lower() in ("http", "https"):
-                  # Direct HTTP/HTTPS URL (Pixeldrain, HuggingFace, Gofile direct, etc.)
-                  # Dropbox share links normally show a preview page; request the file instead.
-                  if parsed.hostname and (parsed.hostname.lower() == "dropbox.com" or parsed.hostname.lower().endswith(".dropbox.com")):
+                  # Dropbox shared folders download as ZIP archives; shared files download directly.
+                  is_dropbox = parsed.hostname and (parsed.hostname.lower() == "dropbox.com" or parsed.hostname.lower().endswith(".dropbox.com"))
+                  if is_dropbox:
                       from urllib.parse import parse_qsl, urlencode
                       pairs = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if k != "dl"]
                       pairs.append(("dl", "1"))
                       token = parsed._replace(query=urlencode(pairs)).geturl()
-                  results.append(f"direct:{token}")
+                      if re.search(r"/(?:sh|scl/fo)/", parsed.path):
+                          results.append(f"dropbox_folder:{token}")
+                      else:
+                          results.append(f"direct:{token}")
+                  else:
+                      # Direct HTTP/HTTPS URL (Pixeldrain, HuggingFace, Gofile direct, etc.)
+                      results.append(f"direct:{token}")
 
           if not results:
               raise SystemExit(
@@ -284,7 +290,7 @@ jobs:
               [[ -z "$item" ]] && continue
               kind="${item%%:*}"
               local rest="${item#*:}"
-              if [[ "$kind" == "direct" ]]; then
+              if [[ "$kind" == "direct" || "$kind" == "dropbox_folder" ]]; then
                 target_id="$rest"
                 mask_value "$target_id"
               else
@@ -306,7 +312,7 @@ jobs:
                 idx=$((idx + 1))
                 kind="${item%%:*}"
                 local rest="${item#*:}"
-                if [[ "$kind" == "direct" ]]; then
+                if [[ "$kind" == "direct" || "$kind" == "dropbox_folder" ]]; then
                   target_id="$rest"
                 else
                   target_id="${rest%%:*}"
@@ -325,6 +331,26 @@ jobs:
                   fi
                   if [[ ! -d "$output" ]] || [[ -z "$(ls -A "$output" 2>/dev/null)" ]]; then
                     echo "::error::Downloaded Google Drive folder is empty."
+                    exit 1
+                  fi
+                elif [[ "$kind" == "dropbox_folder" ]]; then
+                  mkdir -p "$output"
+                  local archive="$gdown_home/dropbox-folder-$idx.zip"
+                  if ! curl -fL --retry 3 --retry-delay 2 -o "$archive" "$target_id" >"$download_log" 2>&1; then
+                    echo "::error::Dropbox folder download failed. Check that the shared folder is accessible to anyone with the link."
+                    exit 1
+                  fi
+                  if ! unzip -tq "$archive" >/dev/null 2>&1; then
+                    echo "::error::Dropbox did not return a valid folder ZIP. Check that the link is a shared-folder link, not a file link."
+                    exit 1
+                  fi
+                  if ! unzip -oq "$archive" -d "$output" >"$download_log" 2>&1; then
+                    echo "::error::Could not extract the Dropbox folder ZIP."
+                    exit 1
+                  fi
+                  rm -f "$archive"
+                  if [[ -z "$(ls -A "$output" 2>/dev/null)" ]]; then
+                    echo "::error::Downloaded Dropbox folder is empty."
                     exit 1
                   fi
                 elif [[ "$(basename "$output")" == "prod.keys" ]]; then
