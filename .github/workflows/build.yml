@@ -263,6 +263,12 @@ jobs:
                   results.append(f"{kind}:{file_id}:{token}")
               elif parsed.scheme.lower() in ("http", "https"):
                   # Direct HTTP/HTTPS URL (Pixeldrain, HuggingFace, Gofile direct, etc.)
+                  # Dropbox share links normally show a preview page; request the file instead.
+                  if parsed.hostname and (parsed.hostname.lower() == "dropbox.com" or parsed.hostname.lower().endswith(".dropbox.com")):
+                      from urllib.parse import parse_qsl, urlencode
+                      pairs = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if k != "dl"]
+                      pairs.append(("dl", "1"))
+                      token = parsed._replace(query=urlencode(pairs)).geturl()
                   results.append(f"direct:{token}")
 
           if not results:
