@@ -133,9 +133,9 @@ jobs:
           packer = Path("dm/ios/tools/build_ipa.sh").read_text()
           legacy = Path("dm/ios/tools/prepare_legacy_resources.py").read_text()
           checks = {
-              "IoStore export-bundle parser": "def export_bundles" in uepak and "def inline_in_containers" in uepak,
+              "UE4/UE5 IoStore export-bundle parser": "def export_bundles" in uepak and "IO_EXPORT_BUNDLE_427" in uepak and "IO_EXPORT_BUNDLE" in uepak and "def inline_in_containers" in uepak,
               "IoStore inline-shader reader": "def ue_io_shaders" in split and "UE_IO" in split,
-              "main-key-aware Unreal package scan": "mains=[exefs / 'main']" in profile and "mains=()" in split,
+              "encrypted IoStore/pak key support": "class Keys" in uepak and "if self.encrypted and not self.key" in uepak and "mains=[exefs / 'main']" in profile and "mains=()" in split,
               "legacy Metal renderer": 'case "${DM_IOS_RENDERER:-legacy}" in' in packer and "gfx/nvn/legacy/dmsh_chain.h" in packer,
               "supported legacy capability selector": "if target not in ('a10x', 'm2'):" in legacy,
           }
