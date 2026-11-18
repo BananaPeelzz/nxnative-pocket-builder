@@ -34,17 +34,17 @@ on:
         type: boolean
         default: false
       game_url:
-        description: "Base Game (.nsp/.xci/.nsz/.xcz/.nup) Google Drive or direct HTTP link (blank = Game_URL secret)"
+        description: "Google Drive folder with base game, update and DLCs, or a single base-game package (blank = Game_URL secret)"
         required: false
         type: string
         default: ""
       update_url:
-        description: "Update Google Drive or direct HTTP link (optional; leave blank if none)"
+        description: "Optional separate update link; leave blank if update is already inside the Game_URL folder"
         required: false
         type: string
         default: ""
       dlc_url:
-        description: "DLC Google Drive or direct HTTP link (optional; leave blank if none)"
+        description: "Optional separate DLC link; leave blank if DLCs are already inside the Game_URL folder"
         required: false
         type: string
         default: ""
