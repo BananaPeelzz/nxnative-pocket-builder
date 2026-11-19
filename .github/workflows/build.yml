@@ -198,6 +198,69 @@ jobs:
           print("Installed targeted Unreal IoStore diagnostics in scripts/build_ipa_from_nsp.py")
           PY
 
+      - name: Add Godot shader-format reconnaissance to survey
+        if: inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/build_ipa_from_nsp.py")
+          source = path.read_text()
+          lines = source.splitlines(keepends=True)
+          index = next((i for i, line in enumerate(lines) if line.startswith("    R += ['', 'extensions: '")), None)
+          if index is None:
+              raise SystemExit("Expected survey extension-summary line was not found; refusing to patch an unexpected engine version.")
+          if "## Shader asset header reconnaissance" in source:
+              raise SystemExit("Godot shader reconnaissance is already installed.")
+          addition = r'''
+              # Godot titles can keep compiled shaders in engine-specific resources rather than loose BNSH/BAHS/SPIR-V files.
+              # The survey manifest already contains each RomFS path, size and first 32 bytes; report likely shader assets
+              # without extracting or publishing the game files themselves.
+              manifest = ex / 'romfs_manifest.tsv'
+              candidates = {}
+              if manifest.is_file():
+                  for line in manifest.read_text(errors='replace').splitlines():
+                      if not line or line.startswith('#'):
+                          continue
+                      fields = line.split('\\t')
+                      if len(fields) != 3:
+                          continue
+                      name, size, head = fields
+                      lower = name.lower()
+                      ext = Path(name).suffix.lower() or '(no extension)'
+                      if not (ext in {'.cache', '.gdshader', '.res', '.ctex', '.ctexarray', '.scn', '.material', '.mesh'}
+                              or 'shader_cache/' in lower or ('shader' in lower and len(name) < 240)):
+                          continue
+                      try:
+                          raw = bytes.fromhex(head)
+                          nbytes = int(size)
+                      except (ValueError, TypeError):
+                          continue
+                      candidates.setdefault(ext, []).append((name, nbytes, raw))
+              R += ['', '## Shader asset header reconnaissance', '',
+                    'First 32 bytes from the RomFS manifest; this is identification data, not extracted game content.', '',
+                    '| type | path | size (bytes) | first bytes (hex) |',
+                    '|---|---|---:|---|']
+              emitted = 0
+              for ext in sorted(candidates):
+                  rows = sorted(candidates[ext], key=lambda item: (0 if 'shader' in item[0].lower() else 1, -item[1], item[0]))[:12]
+                  for name, nbytes, raw in rows:
+                      R.append(f'| {ext} | {name} | {nbytes} | {raw.hex()} |')
+                      emitted += 1
+                      if emitted >= 100:
+                          break
+                  if emitted >= 100:
+                      break
+              if not emitted:
+                  R.append('| — | No candidate shader assets matched the known Godot-related paths/extensions | — | — |')
+          '''
+          lines.insert(index + 1, addition + "\n")
+          path.write_text("".join(lines))
+          print("Installed Godot shader asset header reconnaissance in the legacy survey.")
+          PY
+
       - name: Record engine revision and runner tools
         shell: bash
         run: |
