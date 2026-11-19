@@ -305,6 +305,341 @@ jobs:
           print("Installed runtime NRO graphics import diagnostics in the legacy survey.")
           PY
 
+      - name: Install Godot GDSC and GSBD shader reader
+        if: inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scripts
+          cat > scripts/smolv_codec.cpp <<'CPP'
+          #include "smolv.h"
+          #include <cstdint>
+          #include <cstring>
+          #include <fstream>
+          #include <iostream>
+          #include <iterator>
+          #include <vector>
+
+          static bool read_file(const char *path, std::vector<uint8_t> &out) {
+              std::ifstream f(path, std::ios::binary);
+              if (!f) return false;
+              out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+              return f.good() || f.eof();
+          }
+          static bool write_file(const char *path, const uint8_t *data, size_t size) {
+              std::ofstream f(path, std::ios::binary);
+              if (!f) return false;
+              f.write(reinterpret_cast<const char *>(data), static_cast<std::streamsize>(size));
+              return f.good();
+          }
+          int main(int argc, char **argv) {
+              if (argc == 2 && std::strcmp(argv[1], "selftest") == 0) {
+                  std::vector<uint32_t> source = {0x07230203u, 0x00010000u, 0u, 1u, 0u, 0x00010000u};
+                  for (int i = 0; i < 128; ++i) source.push_back(0x00010000u);
+                  smolv::ByteArray encoded;
+                  if (!smolv::Encode(source.data(), source.size() * sizeof(uint32_t), encoded)) {
+                      std::cerr << "SMOL-V encode self-test failed\n"; return 2;
+                  }
+                  size_t decoded_size = smolv::GetDecodedBufferSize(encoded.data(), encoded.size());
+                  std::vector<uint8_t> decoded(decoded_size);
+                  if (!decoded_size || !smolv::Decode(encoded.data(), encoded.size(), decoded.data(), decoded.size()) ||
+                      decoded.size() != source.size() * sizeof(uint32_t) ||
+                      std::memcmp(decoded.data(), source.data(), decoded.size()) != 0) {
+                      std::cerr << "SMOL-V decode self-test failed\n"; return 3;
+                  }
+                  std::cout << "SMOL-V encode/decode self-test PASS (" << decoded.size() << " bytes)\n";
+                  return 0;
+              }
+              if (argc != 4 || (std::strcmp(argv[1], "decode") != 0 && std::strcmp(argv[1], "encode") != 0)) {
+                  std::cerr << "usage: smolv_codec selftest | decode input output | encode input output\n"; return 1;
+              }
+              std::vector<uint8_t> input;
+              if (!read_file(argv[2], input)) { std::cerr << "cannot read input\n"; return 4; }
+              if (std::strcmp(argv[1], "encode") == 0) {
+                  smolv::ByteArray encoded;
+                  if (!smolv::Encode(input.data(), input.size(), encoded)) { std::cerr << "SMOL-V encode failed\n"; return 5; }
+                  return write_file(argv[3], encoded.data(), encoded.size()) ? 0 : 6;
+              }
+              size_t decoded_size = smolv::GetDecodedBufferSize(input.data(), input.size());
+              if (!decoded_size) { std::cerr << "invalid SMOL-V header\n"; return 7; }
+              std::vector<uint8_t> decoded(decoded_size);
+              if (!smolv::Decode(input.data(), input.size(), decoded.data(), decoded.size())) {
+                  std::cerr << "invalid SMOL-V payload\n"; return 8;
+              }
+              return write_file(argv[3], decoded.data(), decoded.size()) ? 0 : 9;
+          }
+          CPP
+
+          cat > scripts/godot_shader_cache.py <<'PY'
+          #!/usr/bin/env python3
+          """Read Godot 4.3 Vulkan GDSC v3 caches and GSBD v4 shader containers.
+          Extracts SMOL-V SPIR-V stages; it does not modify the renderer or game files."""
+          import argparse
+          import hashlib
+          import json
+          import os
+          import struct
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dm/tools"))
+          import romfs as rfs
+
+          GDSC_VERSION = 3
+          GSBD_VERSION = 4
+          GSBD_DATA_SIZE = 0x38
+          SPIRV_MAGIC = b"\x03\x02\x23\x07"
+          STAGES = {0: "vert", 1: "frag", 2: "tesc", 3: "tese", 4: "comp"}
+
+          def u32(data, offset, label):
+              if offset < 0 or offset + 4 > len(data):
+                  raise ValueError(f"truncated {label} at 0x{offset:x}")
+              return struct.unpack_from("<I", data, offset)[0]
+
+          def align4(value):
+              return (value + 3) & ~3
+
+          def decode_gsbd(blob, codec, temp_dir, cache_hash, variant_index, stats):
+              if len(blob) < 16 + GSBD_DATA_SIZE or blob[:4] != b"GSBD":
+                  raise ValueError("variant is not a complete GSBD shader container")
+              version = u32(blob, 4, "GSBD version")
+              data_size = u32(blob, 8, "GSBD reflection size")
+              if version != GSBD_VERSION or data_size != GSBD_DATA_SIZE:
+                  raise ValueError(f"unsupported GSBD version/data size: {version}/{data_size}; expected 4/56")
+              fields = struct.unpack_from("<Q11I", blob, 16)
+              specialization_count = fields[2]
+              set_count = fields[7]
+              stage_count = fields[10]
+              shader_name_len = fields[11]
+              offset = 16 + data_size
+              if offset + shader_name_len > len(blob):
+                  raise ValueError("shader name exceeds GSBD container")
+              offset = align4(offset + shader_name_len)
+              for set_index in range(set_count):
+                  count = u32(blob, offset, f"uniform count for set {set_index}")
+                  offset += 4 + count * 20
+                  if offset > len(blob):
+                      raise ValueError("uniform reflection exceeds GSBD container")
+              offset += specialization_count * 16
+              if offset > len(blob):
+                  raise ValueError("specialization data exceeds GSBD container")
+              stage_outputs = []
+              for stage_index in range(stage_count):
+                  if offset + 12 > len(blob):
+                      raise ValueError("truncated GSBD stage header")
+                  stage, smolv_size, zstd_size = struct.unpack_from("<III", blob, offset)
+                  offset += 12
+                  if stage not in STAGES:
+                      raise ValueError(f"unsupported shader stage ID {stage}")
+                  payload_size = zstd_size if zstd_size else smolv_size
+                  if payload_size == 0 or offset + payload_size > len(blob):
+                      raise ValueError("invalid or truncated GSBD stage payload")
+                  payload = blob[offset:offset + payload_size]
+                  offset = align4(offset + payload_size)
+                  if zstd_size:
+                      result = subprocess.run(["zstd", "-q", "-d", "-c"], input=payload,
+                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                      if result.returncode:
+                          raise ValueError("Zstandard decompression failed: " + result.stderr.decode(errors="replace")[-240:])
+                      smolv = result.stdout
+                  else:
+                      smolv = payload
+                  if len(smolv) != smolv_size:
+                      raise ValueError(f"SMOL-V length mismatch: expected {smolv_size}, got {len(smolv)}")
+                  smolv_path = Path(temp_dir) / f"{cache_hash}_{variant_index}_{stage_index}.smolv"
+                  spv_path = smolv_path.with_suffix(".spv")
+                  smolv_path.write_bytes(smolv)
+                  result = subprocess.run([str(codec), "decode", str(smolv_path), str(spv_path)],
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                  if result.returncode:
+                      raise ValueError("SMOL-V decode failed: " + result.stderr.decode(errors="replace")[-240:])
+                  spirv = spv_path.read_bytes()
+                  if len(spirv) < 20 or len(spirv) % 4 or spirv[:4] != SPIRV_MAGIC:
+                      raise ValueError("decoded stage is not a valid little-endian SPIR-V module")
+                  digest = hashlib.sha256(spirv).hexdigest()
+                  stage_outputs.append((stage, digest, spirv))
+                  stats["stages"] += 1
+              if offset != len(blob):
+                  raise ValueError(f"GSBD container size mismatch: parsed {offset}, actual {len(blob)}")
+              return stage_outputs
+
+          def parse_roots(roots, out_dir, codec):
+              out_dir = Path(out_dir)
+              out_dir.mkdir(parents=True, exist_ok=True)
+              stats = {"cache_files": 0, "variants": 0, "stages": 0, "unique_spirv": 0, "bytes": 0}
+              seen = set()
+              with tempfile.TemporaryDirectory(prefix="godot-gsbd-", dir=out_dir) as temp_dir:
+                  for root in roots:
+                      for directory, _, files in rfs.os.walk(str(root)):
+                          for name in files:
+                              if not name.lower().endswith(".vulkan.cache"):
+                                  continue
+                              cache_path = os.path.join(directory, name)
+                              with rfs.open(cache_path, "rb") as stream:
+                                  cache = stream.read()
+                              stats["cache_files"] += 1
+                              stats["bytes"] += len(cache)
+                              if len(cache) < 12 or cache[:4] != b"GDSC":
+                                  raise ValueError(f"{cache_path}: missing GDSC header")
+                              version, variant_count = struct.unpack_from("<II", cache, 4)
+                              if version != GDSC_VERSION:
+                                  raise ValueError(f"{cache_path}: GDSC version {version}, expected {GDSC_VERSION}")
+                              if variant_count > 100000:
+                                  raise ValueError(f"{cache_path}: implausible variant count {variant_count}")
+                              offset = 12
+                              cache_hash = hashlib.sha256(cache).hexdigest()[:16]
+                              for variant_index in range(variant_count):
+                                  size = u32(cache, offset, "GDSC variant size")
+                                  offset += 4
+                                  if size == 0:
+                                      continue
+                                  if offset + size > len(cache):
+                                      raise ValueError(f"{cache_path}: variant {variant_index} exceeds cache file")
+                                  variant = cache[offset:offset + size]
+                                  offset += size
+                                  stats["variants"] += 1
+                                  stages = decode_gsbd(variant, codec, temp_dir, cache_hash, variant_index, stats)
+                                  for stage, digest, spirv in stages:
+                                      if digest in seen:
+                                          continue
+                                      seen.add(digest)
+                                      suffix = STAGES[stage]
+                                      (out_dir / f"{cache_hash}_v{variant_index:04d}_{suffix}_{digest[:10]}.spv").write_bytes(spirv)
+                                      stats["unique_spirv"] += 1
+                              if offset != len(cache):
+                                  raise ValueError(f"{cache_path}: parsed {offset} bytes, actual {len(cache)}")
+              return stats
+
+          def self_test(codec):
+              with tempfile.TemporaryDirectory(prefix="godot-gsbd-test-") as temp:
+                  temp = Path(temp)
+                  root = temp / "romfs"
+                  cache_dir = root / "shader_cache"
+                  cache_dir.mkdir(parents=True)
+                  source_spv = temp / "source.spv"
+                  words = [0x07230203, 0x00010000, 0, 1, 0] + [0x00010000] * 128
+                  source_bytes = struct.pack("<" + "I" * len(words), *words)
+                  source_spv.write_bytes(source_bytes)
+                  smolv_path = temp / "source.smolv"
+                  subprocess.run([str(codec), "encode", str(source_spv), str(smolv_path)], check=True)
+                  smolv = smolv_path.read_bytes()
+                  compressed = subprocess.run(["zstd", "-q", "-c"], input=smolv,
+                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True).stdout
+                  data = struct.pack("<Q11I", 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0) + b"\0" * 4
+                  stage_record = struct.pack("<III", 0, len(smolv), len(compressed)) + compressed
+                  stage_record += b"\0" * (align4(len(stage_record)) - len(stage_record))
+                  gsbd = b"GSBD" + struct.pack("<III", GSBD_VERSION, GSBD_DATA_SIZE, 0) + data + stage_record
+                  cache = b"GDSC" + struct.pack("<II", GDSC_VERSION, 1) + struct.pack("<I", len(gsbd)) + gsbd
+                  (cache_dir / "fixture.vulkan.cache").write_bytes(cache)
+                  output = temp / "out"
+                  stats = parse_roots([root], output, codec)
+                  decoded = list(output.glob("*.spv"))
+                  if stats["cache_files"] != 1 or stats["variants"] != 1 or stats["stages"] != 1 or len(decoded) != 1:
+                      raise SystemExit("GDSC/GSBD synthetic fixture count check failed: " + json.dumps(stats))
+                  if decoded[0].read_bytes() != source_bytes:
+                      raise SystemExit("GDSC/GSBD synthetic fixture SPIR-V round-trip mismatch")
+                  print("GDSC v3 / GSBD v4 / Zstandard / SMOL-V parser self-test PASS")
+                  print(json.dumps(stats, sort_keys=True))
+
+          def main():
+              parser = argparse.ArgumentParser()
+              parser.add_argument("--root", action="append", default=[])
+              parser.add_argument("--out")
+              parser.add_argument("--codec", required=True)
+              parser.add_argument("--self-test", action="store_true")
+              args = parser.parse_args()
+              if args.self_test:
+                  self_test(args.codec)
+                  return
+              if not args.root or not args.out:
+                  parser.error("--root and --out are required unless --self-test is used")
+              stats = parse_roots(args.root, args.out, args.codec)
+              if stats["cache_files"] and not stats["unique_spirv"]:
+                  raise SystemExit("GDSC files were found but no SPIR-V stages were extracted: " + json.dumps(stats))
+              print(json.dumps(stats, sort_keys=True))
+          if __name__ == "__main__":
+              try:
+                  main()
+              except Exception as error:
+                  sys.exit(f"[GODOT SHADER CACHE ERROR] {type(error).__name__}: {error}")
+          PY
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/build_ipa_from_nsp.py")
+          source = path.read_text()
+          if "godot_shader_cache.py" in source:
+              raise SystemExit("Godot cache reader hook already exists; refusing to patch twice.")
+
+          # Run the reader after the merged game/DLC RomFS exists, before shader selection/build.
+          needle = "    sh = work / 'shader'"
+          addition = """    # Decode Godot Vulkan shader caches without changing the selected renderer.
+          godot_spirv = work / 'godot_spirv'
+          godot_roots = [rfs.source(game)] + dlc_roms
+          godot_cache_count = 0
+          for root in godot_roots:
+              for directory, _, files in rfs.os.walk(str(root)):
+                  godot_cache_count += sum(1 for name in files if name.lower().endswith('.vulkan.cache'))
+          if godot_cache_count:
+              rmtree(godot_spirv)
+              command = [sys.executable, repo / 'scripts/godot_shader_cache.py', '--out', godot_spirv,
+                         '--codec', repo / 'scripts/smolv_codec']
+              for root in godot_roots:
+                  command += ['--root', root]
+              run(command, logs / 'godot_shader_cache.log', env=env)
+              env['DM_GODOT_SPIRV'] = str(godot_spirv)
+              say(f'Godot shader cache reader: {godot_cache_count} cache file(s), {len(list(godot_spirv.glob(\"*.spv\")))} unique SPIR-V stage(s)')
+          else:
+              env.pop('DM_GODOT_SPIRV', None)
+              say('Godot shader cache reader: no .vulkan.cache files found in the packed game/DLC RomFS')
+          """
+          if needle not in source:
+              raise SystemExit("Expected shader build insertion point not found; refusing to patch unexpected engine source.")
+          source = source.replace(needle, addition + needle, 1)
+
+          # Only the Vulkan shader translator consumes the extracted SPIR-V; NVN/legacy Metal selection is untouched.
+          needle = "    PROG.stage('Vulkan shaders', step='checking the inputs')"
+          addition = """    godot_spirv = Path(env.get('DM_GODOT_SPIRV', ''))
+          if godot_spirv.is_dir() and any(godot_spirv.glob('*.spv')):
+              roots = [*roots, godot_spirv]
+              say(f'Vulkan shader translation includes {len(list(godot_spirv.glob(\"*.spv\")))} SPIR-V stage(s) extracted from Godot GSBD caches')
+          """
+          if needle not in source:
+              raise SystemExit("Expected Vulkan shader builder insertion point not found; refusing to patch unexpected engine source.")
+          source = source.replace(needle, addition + needle, 1)
+
+          # Trace custom graphics-init imports to their ExeFS symbol providers in the survey.
+          needle = "    nro_add = pg.nro_modules(ex / 'ExeFS', nros, keep) if nros else {}"
+          addition = """    # Resolve custom graphics initialization imports against the ExeFS modules' dynamic exports.
+          graphics_symbols = sorted(s for s in mods['main']['imports']
+                                    if any(t in s.lower() for t in ('initializegraphics', 'setgraphicsallocator',
+                                                                     'setgraphicsdevtoolsallocator', 'nvn', 'vk', 'egl')))
+          R += ['', '## ExeFS graphics symbol providers', '',
+                'Dynamic import/export matching for main graphics initialization; a missing provider is left unresolved rather than guessed.', '']
+          if graphics_symbols:
+              for symbol in graphics_symbols[:80]:
+                  providers = [module for module, info in mods.items() if symbol in info.get('exports', set())]
+                  R.append(f'- {symbol}: ' + (', '.join(providers) if providers else 'no matching ExeFS export (host/runtime provider or unresolved)'))
+          else:
+              R.append('- No custom graphics initialization imports matched the diagnostic filter.')
+          for module in ('sdk', 'subsdk0', 'subsdk1'):
+              if module not in mods:
+                  continue
+              exports = mods[module].get('exports', set())
+              related = sorted(s for s in exports if any(t in s.lower() for t in
+                               ('initializegraphics', 'setgraphicsallocator', 'nvn', 'vkcreate', 'eglget', 'glshader')))
+              R.append(f'- {module} graphics-related exports: ' + (', '.join(related[:60]) if related else 'none in the selected export filter'))
+          """
+          if needle not in source:
+              raise SystemExit("Expected ExeFS module-provider insertion point not found; refusing to patch unexpected engine source.")
+          source = source.replace(needle, addition + needle, 1)
+          path.write_text(source)
+          print("Installed the Godot GDSC/GSBD reader hook and ExeFS graphics-provider survey diagnostics.")
+          PY
+
       - name: Record engine revision and runner tools
         shell: bash
         run: |
@@ -341,6 +676,19 @@ jobs:
               || sudo xcodebuild -downloadComponent MetalToolchain
           fi
           xcrun -sdk iphoneos metal --version | head -1
+
+      - name: Compile and self-test Godot shader cache reader
+        if: inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/godot-smolv"
+          curl -fsSL https://raw.githubusercontent.com/godotengine/godot/4.3-stable/thirdparty/misc/smolv.h -o "$RUNNER_TEMP/godot-smolv/smolv.h"
+          curl -fsSL https://raw.githubusercontent.com/godotengine/godot/4.3-stable/thirdparty/misc/smolv.cpp -o "$RUNNER_TEMP/godot-smolv/smolv.cpp"
+          clang++ -std=c++17 -O2 -I "$RUNNER_TEMP/godot-smolv" scripts/smolv_codec.cpp "$RUNNER_TEMP/godot-smolv/smolv.cpp" -o scripts/smolv_codec
+          scripts/smolv_codec selftest
+          python scripts/godot_shader_cache.py --self-test --codec scripts/smolv_codec
+          echo "Godot shader-cache parser and SMOL-V decoder tests passed."
 
       - name: Download game files and keys
         env:
