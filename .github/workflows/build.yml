@@ -224,7 +224,7 @@ jobs:
                   for line in manifest.read_text(errors='replace').splitlines():
                       if not line or line.startswith('#'):
                           continue
-                      fields = line.split('\\t')
+                      fields = line.split('\t')
                       if len(fields) != 3:
                           continue
                       name, size, head = fields
