@@ -261,6 +261,50 @@ jobs:
           print("Installed Godot shader asset header reconnaissance in the legacy survey.")
           PY
 
+      - name: Add runtime graphics-module diagnostics to survey
+        if: inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/build_ipa_from_nsp.py")
+          source = path.read_text()
+          lines = source.splitlines(keepends=True)
+          index = next((i for i, line in enumerate(lines) if line.startswith("    nro_add = pg.nro_modules(")), None)
+          if index is None:
+              raise SystemExit("Expected NRO inspection point was not found; refusing to patch an unexpected engine version.")
+          if "## Runtime-loaded NRO graphics imports" in source:
+              raise SystemExit("NRO graphics diagnostics are already installed.")
+          addition = r'''
+              # The main NSO can delegate graphics initialization to NROs loaded through nn::ro.
+              # Record only dynamic imports and known API markers, never full binary contents.
+              R += ['', '## Runtime-loaded NRO graphics imports', '',
+                    'Graphics-related imports from each runtime-loaded NRO; these help distinguish NVN, Vulkan and EGL/OpenGL paths.', '']
+              main_graphics = sorted(s for s in mods['main']['imports']
+                                     if any(t in s.lower() for t in ('nvn', 'vk', 'egl', 'shader', 'initializegraphics', 'setgraphics')))
+              R.append('Main graphics-related imports: ' + (', '.join(main_graphics[:100]) if main_graphics else 'none detected'))
+              for nro_name, nro_path in sorted(nros.items()):
+                  try:
+                      data = nro_path.read_bytes()
+                      symbols = pg.nso_syms.dynsyms(data)
+                      imported = sorted(s for s, defined, _ in symbols if not defined)
+                      related = [s for s in imported if any(t in s.lower() for t in ('nvn', 'vk', 'egl', 'shader', 'initializegraphics', 'setgraphics'))
+                                 or s.lower().startswith('gl')]
+                      markers = [m for m in ('nvnBootstrapLoader', 'vkCreateInstance', 'eglGetProcAddress', 'glShaderSource', 'Godot Engine')
+                                 if m.encode() in data]
+                      R.append(f'- {nro_name}: {len(imported)} imports; API markers: {", ".join(markers) if markers else "none"}')
+                      R.extend(f'  - {name}' for name in related[:60])
+                  except Exception as error:
+                      R.append(f'- {nro_name}: could not inspect imports ({type(error).__name__})')
+              R.append('NRO-supplied non-driver modules: ' + (', '.join(f'{name} ({kind})' for name, kind in nro_add.items()) if nro_add else 'none detected'))
+          '''
+          lines.insert(index + 1, addition + "\n")
+          path.write_text("".join(lines))
+          print("Installed runtime NRO graphics import diagnostics in the legacy survey.")
+          PY
+
       - name: Record engine revision and runner tools
         shell: bash
         run: |
